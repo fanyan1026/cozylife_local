@@ -1,55 +1,51 @@
-"""Example Load Platform integration."""
+"""The CozyLife Local integration."""
 from __future__ import annotations
 
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.discovery import async_load_platform
-from homeassistant.helpers.typing import ConfigType
 import logging
-import time
-from .const import (
-    DOMAIN,
-    LANG
-)
-from .utils import get_pid_list
-from .udp_discover import get_ip
-from .tcp_client import tcp_client
+from typing import Final
 
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
+
+from .const import DOMAIN
+from .cozy_client import CozyClient
 
 _LOGGER = logging.getLogger(__name__)
 
+PLATFORMS: Final = [
+    Platform.LIGHT,
+    Platform.SWITCH,
+]
 
-def setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    
-    """
-    TODO:timer discover
-    config:{'lang': 'zh', 'ip': ['192.168.5.201', '192.168.5.202', '192.168.5.1']}
-}
-    """
-    ip = get_ip()
-    ip_from_config = config[DOMAIN].get('ip') if config[DOMAIN].get('ip') is not None else []    
-    ip += ip_from_config
-    ip_list = []
-    [ip_list.append(i) for i in ip if i not in ip_list]
 
-    if 0 == len(ip_list):
-        _LOGGER.info('discover nothing')
-        return True
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up CozyLife Local from a config entry."""
+    hass.data.setdefault(DOMAIN, {})
 
-    _LOGGER.info('try conncet ip_list:', ip_list)
-    lang_from_config = (config[DOMAIN].get('lang') if config[DOMAIN].get('lang') is not None else LANG)
-    get_pid_list(lang_from_config)
+    client = CozyClient(
+        host=entry.data["host"],
+        port=entry.data.get("port", 5555),
+        hass=hass  # 传递 hass 对象
+    )
 
-    hass.data[DOMAIN] = {
-        'temperature': 24,
-        'ip': ip_list,
-        'tcp_client': [tcp_client(item) for item in ip_list],
-    }
+    try:
+        await client.async_connect()
+    except Exception as exc:
+        _LOGGER.error("Failed to connect to device: %s", exc)
+        raise ConfigEntryNotReady from exc
 
-    #wait for get device info from tcp conncetion
-    #but it is bad
-    time.sleep(3)
-    # _LOGGER.info('setup', hass, config)
-    # hass.helpers.discovery.load_platform('sensor', DOMAIN, {}, config)
-    hass.loop.call_soon_threadsafe(hass.async_create_task, async_load_platform(hass, 'light', DOMAIN, {}, config))
-    hass.loop.call_soon_threadsafe(hass.async_create_task, async_load_platform(hass, 'switch', DOMAIN, {}, config))
+    hass.data[DOMAIN][entry.entry_id] = client
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        client = hass.data[DOMAIN].pop(entry.entry_id)
+        await client.async_disconnect()
+
+    return unload_ok
